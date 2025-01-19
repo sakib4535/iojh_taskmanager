@@ -3,95 +3,175 @@ import sqlite3
 from datetime import date, timedelta
 import pandas as pd
 from docx import Document
-import matplotlib.pyplot as plt
+
+# List of employees and their roles (departments)
+employees_data = [
+    ("Zaedul Islam", "IT manager"),
+    ("Ehsan", "Researcher"),
+    ("Rakib", "Finance and Research"),
+    ("Baki Billah", "Research"),
+    ("Dilruba", "Marketing"),
+    ("Hasnain", "Statistician"),
+    ("Tanzila", "Customer Support"),
+    ("Thrina", "Research Supervisor"),
+    ("Faysal", "IT & Operations"),
+    ("Suraiya", "HR"),
+]
 
 
-# Initialize SQLite database
+
 def init_db():
     connection = sqlite3.connect("tasks.db")
     cursor = connection.cursor()
 
-    # Create tasks table if it doesn't exist
-    cursor.execute(""" CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            description TEXT,
-            category TEXT,
-            status TEXT DEFAULT 'Pending',
-            assigned_to TEXT,
-            deadline DATE,
-            file_path TEXT
-        )
-    """)
+    # Create employees table
+    cursor.execute("""CREATE TABLE IF NOT EXISTS employees (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        department TEXT NOT NULL
+    )""")
 
-    # Create employees table with their departments
-    cursor.execute(""" CREATE TABLE IF NOT EXISTS employees (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            department TEXT
-        )
-    """)
+    # Create tasks table
+    cursor.execute("""CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT,
+        category TEXT,
+        status TEXT DEFAULT 'Pending',
+        assigned_to INTEGER,
+        deadline DATE,
+        priority TEXT,
+        recurrence TEXT DEFAULT 'None',
+        file_path TEXT,
+        FOREIGN KEY (assigned_to) REFERENCES employees (id)
+    )""")
+
+
+
+    # Create subtasks table
+    cursor.execute("""CREATE TABLE IF NOT EXISTS subtasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER,
+        title TEXT NOT NULL,
+        status TEXT DEFAULT 'Pending',
+        FOREIGN KEY (task_id) REFERENCES tasks (id)
+    )""")
+
+    # Checking if the recurrence column exists, and adding it if not
+    try:
+        cursor.execute("SELECT recurrence FROM tasks LIMIT 1")
+    except sqlite3.OperationalError:
+        # Add the recurrence column if it does not exist
+        cursor.execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT 'None'")
+
+    # Populate employees table if empty
+    cursor.execute("SELECT COUNT(*) FROM employees")
+    if cursor.fetchone()[0] == 0:
+        for name, department in employees_data:
+            cursor.execute("INSERT INTO employees (name, department) VALUES (?, ?)", (name, department))
+
     connection.commit()
+    connection.close()
 
-    return connection
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+# Email function
+def send_email(subject, body, to_email):
+    from_email = "your-email@gmail.com"  # Your email address
+    password = "your-email-password"  # Your email password
+
+    # Set up the MIME
+    msg = MIMEMultipart()
+    msg['From'] = from_email
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+
+    # Set up the server and send email
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(from_email, password)
+        text = msg.as_string()
+        server.sendmail(from_email, to_email, text)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return False
 
 
 
-# Add a task to the database
-def add_task(title, description, category, assigned_to, deadline, file_path=None):
+# Fetch all employees
+def fetch_all_employees():
     connection = sqlite3.connect("tasks.db")
     cursor = connection.cursor()
-    cursor.execute(""" INSERT INTO tasks (title, description, category, assigned_to, deadline, file_path)
-                      VALUES (?, ?, ?, ?, ?, ?) """, (title, description, category, assigned_to, deadline, file_path))
-    connection.commit()
-
-    # Success notification after task addition
-    st.success(f"New Task Assigned: {title} - Deadline: {deadline}")
+    cursor.execute("SELECT id, name FROM employees")
+    employees = cursor.fetchall()
+    connection.close()
+    return employees
 
 
-# Add an employee to the database
-def add_employee(name, department):
+def add_task(title, description, category, assigned_to, deadline, priority, recurrence, subtasks=[], file_path=None):
     connection = sqlite3.connect("tasks.db")
     cursor = connection.cursor()
-    cursor.execute("""INSERT INTO employees (name, department) VALUES (?, ?)""", (name, department))
+
+    # Insert the main task
+    cursor.execute("""
+    INSERT INTO tasks (title, description, category, status, assigned_to, deadline, priority, recurrence, file_path)
+    VALUES (?, ?, ?, 'Pending', ?, ?, ?, ?, ?)""",
+                   (title, description, category, assigned_to, deadline, priority, recurrence, file_path))
+
+    # Fetch the newly created task ID
+    task_id = cursor.lastrowid
+
+    # Insert any subtasks
+    for subtask_title in subtasks:
+        cursor.execute("INSERT INTO subtasks (task_id, title) VALUES (?, ?)", (task_id, subtask_title))
+
     connection.commit()
+    connection.close()
 
 
-# Fetch tasks for a specific employee
-def fetch_employee_tasks(employee_name):
+
+# Fetch tasks assigned to an employee
+def fetch_employee_tasks(employee_id, sort_by_priority=False):
     connection = sqlite3.connect("tasks.db")
     cursor = connection.cursor()
-    cursor.execute("SELECT * FROM tasks WHERE assigned_to = ?", (employee_name,))
-    return cursor.fetchall()
+    query = "SELECT * FROM tasks WHERE assigned_to = ?"
+
+    if sort_by_priority:
+        query += " ORDER BY CASE priority WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END"
+
+    cursor.execute(query, (employee_id,))
+    tasks = cursor.fetchall()
+    connection.close()
+    return tasks
 
 
-# Function to calculate remaining time
-def get_remaining_time(deadline):
-    now = date.today()
-    deadline_date = pd.to_datetime(deadline).date()
-    remaining_time = deadline_date - now
-    return remaining_time.days
-
-
-# Function to update task status
-def update_task_status(task_id, status):
-    connection = sqlite3.connect("tasks.db")
-    cursor = connection.cursor()
-    cursor.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
-    connection.commit()
-
-
-# Function to parse uploaded file (CSV or DOCX)
+# Parse uploaded files
 def parse_file(uploaded_file):
     if uploaded_file.type == "text/csv":
         df = pd.read_csv(uploaded_file)
-        return df.head().to_string()
+        return df.to_string(), uploaded_file.name
     elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         doc = Document(uploaded_file)
-        return "\n".join([para.text for para in doc.paragraphs])
+        content = "\n".join([para.text for para in doc.paragraphs])
+        return content, uploaded_file.name
+    else:
+        return "Unsupported file format.", None
 
 
-# Function to display status bulb (red, yellow, green)
+# Function to calculate remaining days
+def get_remaining_days(deadline):
+    now = date.today()
+    deadline_date = pd.to_datetime(deadline).date()
+    return (deadline_date - now).days
+
+
+# Function to display status bulb
 def status_bulb(status, remaining_time):
     if status == "Completed":
         return "🟢", "green"
@@ -103,235 +183,207 @@ def status_bulb(status, remaining_time):
         return "🟢", "green"
 
 
-# Function to visualize task status distribution
-def plot_task_status_distribution():
+# Handle recurring tasks
+def handle_recurring_tasks():
     connection = sqlite3.connect("tasks.db")
     cursor = connection.cursor()
-    cursor.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status")
-    status_counts = cursor.fetchall()
+
+    # Get tasks with recurrence
+    cursor.execute(
+        "SELECT id, title, recurrence, deadline FROM tasks WHERE recurrence IS NOT NULL AND recurrence != 'None'")
+    recurring_tasks = cursor.fetchall()
+
+    for task in recurring_tasks:
+        task_id, title, recurrence, deadline = task
+        deadline_date = pd.to_datetime(deadline).date()
+        now = date.today()
+
+        if deadline_date < now:
+            if recurrence == "Daily":
+                new_deadline = deadline_date + timedelta(days=1)
+            elif recurrence == "Weekly":
+                new_deadline = deadline_date + timedelta(weeks=1)
+            elif recurrence == "Monthly":
+                new_deadline = deadline_date + pd.DateOffset(months=1)
+            else:
+                continue
+
+            cursor.execute("""
+            INSERT INTO tasks (title, description, category, assigned_to, deadline, priority, recurrence)
+            SELECT title, description, category, assigned_to, ?, priority, recurrence FROM tasks WHERE id = ?""",
+                           (new_deadline, task_id))
+
+    connection.commit()
     connection.close()
-
-    labels = [status[0] for status in status_counts]
-    sizes = [status[1] for status in status_counts]
-
-    # Plotting the pie chart
-    fig, ax = plt.subplots()
-    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, colors=["#ff9999", "#66b3ff", "#99ff99"])
-    ax.axis('equal')  # Equal aspect ratio ensures that pie chart is drawn as a circle.
-    st.pyplot(fig)
-
-
-# Function to visualize remaining time for tasks
-def plot_remaining_time():
-    connection = sqlite3.connect("tasks.db")
-    cursor = connection.cursor()
-    cursor.execute("SELECT title, deadline FROM tasks")
-    tasks = cursor.fetchall()
-    connection.close()
-
-    titles = []
-    remaining_days = []
-
-    for task in tasks:
-        titles.append(task[0])
-        remaining_days.append(get_remaining_time(task[1]))
-
-    # Bar Chart
-    fig, ax = plt.subplots()
-    ax.barh(titles, remaining_days, color=["red" if x <= 0 else "green" for x in remaining_days])
-    ax.set_xlabel('Remaining Days')
-    ax.set_ylabel('Task Titles')
-    ax.set_title('Remaining Time for Tasks')
-    st.pyplot(fig)
-
-
-# Function to visualize employee task assignments
-def plot_employee_task_assignments():
-    connection = sqlite3.connect("tasks.db")
-    cursor = connection.cursor()
-    cursor.execute("SELECT assigned_to, COUNT(*) FROM tasks GROUP BY assigned_to")
-    task_assignments = cursor.fetchall()
-    connection.close()
-
-    employees = [task[0] for task in task_assignments]
-    num_tasks = [task[1] for task in task_assignments]
-
-    # Bar Chart
-    fig, ax = plt.subplots()
-    ax.barh(employees, num_tasks, color='skyblue')
-    ax.set_xlabel('Number of Tasks')
-    ax.set_ylabel('Employee')
-    ax.set_title('Tasks Assigned to Each Employee')
-    st.pyplot(fig)
-
-# Initialize Streamlit app
-# Initialize Streamlit app
-st.image("IOJH-logo.jpeg", width=100)  # Display logo at the top of the app
-st.title("Task Management App")  # Title text for the app
-
-  # Replace with your logo file path and set the desired width
 
 
 # Initialize the database
-connection = init_db()
+init_db()
 
-# Sidebar for employee list and actions
+
+# Initialize Streamlit app
+st.set_page_config(page_title="Task Management App", layout="wide")
+st.title("Automated Task Management App - IOJH")
+
+# Handle recurring tasks at app startup
+handle_recurring_tasks()
+
+# Sidebar for navigation
 with st.sidebar:
-    st.header("Employee Dashboard")
+    st.header("Navigation")
 
-    # Fetch list of employees and departments
-    connection = sqlite3.connect("tasks.db")
-    cursor = connection.cursor()
-    cursor.execute("SELECT * FROM employees")
-    employees = cursor.fetchall()
+    if st.button("Employees Dashboard"):
+        st.header("👨‍💼 Employees Dashboard")
+        employees = fetch_all_employees()
+        if employees:
+            for emp_id, name in employees:
+                st.markdown(f"**Name:** {name}")
+        else:
+            st.write("No employees found in the database.")
 
-    # Display employees and departments in the sidebar
-    employee_dict = {emp[0]: f"{emp[1]} - {emp[2]}" for emp in employees}  # {ID: 'Name - Department'}
-    selected_employee = st.selectbox("Select Employee", options=employee_dict.keys())
+    # Add Task Section
+    st.subheader("➕ Assign a Task")
+    all_employees = fetch_all_employees()
+    employee_names = {str(emp[0]): emp[1] for emp in all_employees}
 
-    # Display selected employee's department
-    if selected_employee:
-        st.write(f"**Department**: {employee_dict[selected_employee]}")
+    if employee_names:
+        selected_emp_id = st.selectbox("Select Employee", options=employee_names.keys(),
+                                       format_func=lambda emp_id: employee_names[emp_id])
+        task_title = st.text_input("Task Title")
+        task_description = st.text_area("Task Description")
+        task_category = st.text_input("Category")
+        task_priority = st.selectbox("Priority", options=["Low", "Medium", "High"])
+        task_recurrence = st.selectbox("Recurrence", options=["None", "Daily", "Weekly", "Monthly"])
+        task_deadline = st.date_input("Deadline", min_value=date.today())
+        add_subtasks = st.checkbox("Add Subtasks?")
 
-    uploaded_file = st.file_uploader("Upload a DOCX or CSV file", type=["csv", "docx"])
-    assigned_to = st.text_input("Assign to Employee", value=employee_dict.get(selected_employee, ""))
-    deadline = st.date_input("Set Project Deadline", min_value=date.today())
+        subtasks = []
+        if add_subtasks:
+            num_subtasks = st.number_input("Number of Subtasks", min_value=1, value=1, step=1)
+            for i in range(num_subtasks):
+                subtasks.append(st.text_input(f"Subtask {i + 1} Title"))
 
-    # New Employee login field
-    employee_name = st.text_input("Enter Employee Name to Access Dashboard")
+        uploaded_file = st.file_uploader("Upload Supporting File (CSV or DOCX)", type=["csv", "docx"])
+        file_name = None
+        if uploaded_file:
+            parsed_content, file_name = parse_file(uploaded_file)
+            st.write("Preview of Uploaded File:")
+            st.text(parsed_content)
 
-    if uploaded_file and assigned_to:
-        file_content = parse_file(uploaded_file)
-        st.write(f"File preview: \n{file_content}")
+        if st.button("Add Task"):
+            if task_title:
+                add_task(task_title, task_description, task_category, selected_emp_id, task_deadline, task_priority,
+                         task_recurrence, subtasks, file_name)
+                st.success(f"Task '{task_title}' assigned to {employee_names[selected_emp_id]}")
+            else:
+                st.error("Task Title is required!")
 
-        # Add task with file and deadline info
-        if st.button("Assign Task"):
-            add_task(
-                title=f"Task for {assigned_to}",
-                description=file_content,
-                category="Project",
-                assigned_to=assigned_to,
-                deadline=deadline,
-                file_path=uploaded_file.name
-            )
-            st.success("Project assigned successfully!")
+    else:
+        st.write("No employees available for task assignment.")
 
-# Tabs for better organization
-# Visualizations Tab
-tab1, tab2, tab3, tab4 = st.tabs(["📋 View Tasks", "➕ Add Task", "🛠 Manage Tasks", "📊 Task Visualizations"])
+
+#######################################
+
+
+# Main Area - Tabs
+tab1, tab2, tab3 = st.tabs(["📋 View Tasks", "📊 Visualizations", "🔧 Task Management"])
 
 # Tab 1: View Tasks
 with tab1:
     st.subheader("📋 All Tasks")
-    tasks = fetch_employee_tasks(employee_name)
+    sort_by_priority = st.checkbox("Sort by Priority")
+    selected_emp_id = st.selectbox("View Tasks For", options=employee_names.keys(),
+                                   format_func=lambda emp_id: employee_names[emp_id])
 
+    tasks = fetch_employee_tasks(selected_emp_id, sort_by_priority)
     if tasks:
         for task in tasks:
-            # Display task info
-            st.markdown(f"### Task: {task[1]}")
-            st.markdown(f"**Category:** {task[3]}")
-            st.markdown(f"**Assigned To:** {task[5]}")
-            st.markdown(f"**Deadline:** {task[6]}")
-            st.markdown(f"**Status:** {task[4]}")
 
-            # Calculate remaining time
-            remaining_days = get_remaining_time(task[6])
+            task_id, title, description, category, status, assigned_to, deadline, priority, recurrence, file_path = task + tuple([None] * (10 - len(task)))
 
-            # Display status bulb and remaining time
-            bulb, color = status_bulb(task[4], remaining_days)
-            status_display = f"{bulb} Status: {task[4]} | Remaining Time: {remaining_days} days"
-            st.markdown(f"<div style='text-align:right;color:{color};'>{status_display}</div>", unsafe_allow_html=True)
+            remaining_days = get_remaining_days(deadline)
+            st.markdown(f"### {title} (ID: {task_id})")
+            st.markdown(f"**Priority:** {priority} | **Recurrence:** {recurrence}")
+            st.markdown(f"**Deadline:** {deadline} | **Remaining Days:** {remaining_days}")
+            bulb, color = status_bulb(status, remaining_days)
+            st.markdown(f"<div style='color:{color};'><b>{bulb} {status}</b></div>", unsafe_allow_html=True)
+            st.markdown(f"**Category:** {category}")
+            if file_path:
+                st.markdown(f"**Uploaded File:** {file_path}")
 
-            if len(task) > 7 and task[7]:
-                st.markdown(f"**File Uploaded:** {task[7]}")
+            # Display Subtasks
+            st.markdown("**Subtasks:**")
+            connection = sqlite3.connect("tasks.db")
+            cursor = connection.cursor()
+            cursor.execute("SELECT title, status FROM subtasks WHERE task_id = ?", (task_id,))
+            subtasks = cursor.fetchall()
+            connection.close()
+            for subtask in subtasks:
+                sub_title, sub_status = subtask
+                st.markdown(f"- {sub_title} ({sub_status})")
 
             st.divider()
     else:
-        st.write("No tasks found. Please enter a valid employee name to view tasks.")
+        st.write("No tasks assigned to this employee.")
 
-# Tab 2: Add Task (with hidden description)
+# Tab 2: Visualizations
+import matplotlib.pyplot as plt
+
+# Tab 2: Visualizations
+import matplotlib.pyplot as plt
+
+# Tab 2: Visualizations
 with tab2:
-    st.subheader("➕ Add a New Task")
+    st.subheader("📊 Task Status Distribution")
 
-    with st.form("Add Task Form"):
-        title = st.text_input("Title")
-        category = st.text_input("Category")
-        assigned_to = st.text_input("Assigned To")
-        deadline = st.date_input("Deadline", min_value=date.today())
+    # Task status count visualization
+    # Query to count tasks per employee
+    connection = sqlite3.connect("tasks.db")
+    cursor = connection.cursor()
 
-        submit_button = st.form_submit_button("Add Task")
+    # Get count of tasks for each employee
+    cursor.execute("""
+        SELECT employees.name, COUNT(tasks.id) 
+        FROM employees 
+        LEFT JOIN tasks ON tasks.assigned_to = employees.id 
+        GROUP BY employees.id
+    """)
+    task_count_data = cursor.fetchall()
+    connection.close()
 
-        # After the task is submitted, it should re-fetch tasks to reflect updates.
-        if submit_button:
-            if title and assigned_to:
-                # Add the task
-                add_task(title, "", category, assigned_to, deadline)  # Empty description field
+    # Separate the data into two lists: names and task counts
+    employee_names_list = [data[0] for data in task_count_data]
+    task_counts = [data[1] for data in task_count_data]
 
-                # Refresh and show success notification
-                st.success("Task added successfully!")
+    # Plotting the data using Matplotlib
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.barh(employee_names_list, task_counts, color='skyblue')
+    ax.set_xlabel('Total Tasks Assigned')
+    ax.set_ylabel('Employee')
+    ax.set_title('Total Tasks Assigned to Employees')
 
-                # Fetch tasks again after adding one
-                tasks = fetch_employee_tasks(employee_name)
+    # Displaying the plot in the Streamlit app
+    st.pyplot(fig)
 
-                if tasks:
-                    for task in tasks:
-                        # Display task info
-                        st.markdown(f"### Task: {task[1]}")
-                        st.markdown(f"**Category:** {task[3]}")
-                        st.markdown(f"**Assigned To:** {task[5]}")
-                        st.markdown(f"**Deadline:** {task[6]}")
-                        st.markdown(f"**Status:** {task[4]}")
-
-                        # Calculate remaining time
-                        remaining_days = get_remaining_time(task[6])
-
-                        # Display status bulb and remaining time
-                        bulb, color = status_bulb(task[4], remaining_days)
-                        status_display = f"{bulb} Status: {task[4]} | Remaining Time: {remaining_days} days"
-                        st.markdown(f"<div style='text-align:right;color:{color};'>{status_display}</div>", unsafe_allow_html=True)
-
-                        if len(task) > 7 and task[7]:
-                            st.markdown(f"**File Uploaded:** {task[7]}")
-
-                        st.divider()
-                else:
-                    st.write("No tasks found. Please try again.")
-            else:
-                st.error("Title and Assigned To are required fields!")
-
-# Tab 3: Manage Tasks
+# Tab 3: Task Management
 with tab3:
-    st.subheader("🛠 Manage Tasks")
-    tasks = fetch_employee_tasks(employee_name)
+    st.subheader("🔧 Task Management")
+    selected_emp_id = st.selectbox("Manage Tasks For", options=employee_names.keys(),
+                                   format_func=lambda emp_id: employee_names[emp_id])
 
+    tasks = fetch_employee_tasks(selected_emp_id)
     if tasks:
-        task_id = st.selectbox("Select Task to Update or Delete", [f"{task[0]}: {task[1]}" for task in tasks])
-        selected_task_id = int(task_id.split(":")[0])
+        selected_task = st.selectbox("Select a Task", [f"{task[0]}: {task[1]}" for task in tasks])
+        task_id = int(selected_task.split(":")[0])
+        new_status = st.selectbox("Update Task Status", ["Pending", "In Progress", "Completed"])
 
-        # Update Status
-        new_status = st.selectbox("Update Status", ["Pending", "In Progress", "Completed"])
         if st.button("Update Status"):
-            update_task_status(selected_task_id, new_status)
+            connection = sqlite3.connect("tasks.db")
+            cursor = connection.cursor()
+            cursor.execute("UPDATE tasks SET status = ? WHERE id = ?", (new_status, task_id))
+            connection.commit()
             st.success("Task status updated!")
-
-        # Delete Task
-        if st.button("Delete Task"):
-            delete_task(selected_task_id)
-            st.warning("Task deleted successfully!")
     else:
         st.write("No tasks available for management.")
 
 
-# Tab 4: Task Visualizations
-with tab4:
-    st.subheader("📊 Task Status Distribution")
-    plot_task_status_distribution()
-
-    st.subheader("🕒 Remaining Time for Tasks")
-    plot_remaining_time()
-
-    st.subheader("👨‍💼 Tasks Assigned to Employees")
-    plot_employee_task_assignments()
-
-# Clean up database connection
-connection.close()
